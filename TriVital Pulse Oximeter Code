@@ -1,0 +1,180 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "BluetoothSerial.h"
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+
+#define TEMP_PIN 34
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+MAX30105 particleSensor;
+BluetoothSerial SerialBT;
+
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+
+long lastBeat = 0;
+
+float beatsPerMinute;
+int beatAvg;
+float spo2;
+float temperatureC;
+
+void setup() {
+  Serial.begin(115200);
+
+  Wire.begin(21, 22);
+
+  SerialBT.begin("TriVital_Watch");
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED not found");
+    while (1);
+  }
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(10, 10);
+  display.println("TriVital Watch");
+  display.setCursor(10, 30);
+  display.println("Initializing...");
+  display.display();
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    display.clearDisplay();
+    display.setCursor(0, 20);
+    display.println("MAX30102 not found");
+    display.display();
+    while (1);
+  }
+
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x1F);
+  particleSensor.setPulseAmplitudeIR(0x1F);
+  particleSensor.setPulseAmplitudeGreen(0);
+
+  delay(2000);
+}
+
+void loop() {
+  long irValue = particleSensor.getIR();
+  long redValue = particleSensor.getRed();
+
+  if (checkForBeat(irValue) == true) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+
+    beatsPerMinute = 60 / (delta / 1000.0);
+
+    if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+      rates[rateSpot++] = (byte)beatsPerMinute;
+      rateSpot %= RATE_SIZE;
+
+      beatAvg = 0;
+      for (byte x = 0; x < RATE_SIZE; x++) {
+        beatAvg += rates[x];
+      }
+      beatAvg /= RATE_SIZE;
+    }
+  }
+
+  spo2 = calculateSpO2(redValue, irValue);
+
+  temperatureC = readTemperature();
+
+  displayData(irValue);
+
+  sendBluetoothData();
+
+  delay(500);
+}
+
+float readTemperature() {
+  int analogValue = analogRead(TEMP_PIN);
+
+  float voltage = analogValue * (3.3 / 4095.0);
+
+  float tempC = voltage * 100.0;
+
+  return tempC;
+}
+
+float calculateSpO2(long red, long ir) {
+  if (ir < 50000) {
+    return 0;
+  }
+
+  float ratio = (float)red / (float)ir;
+
+  float oxygen = 110.0 - 25.0 * ratio;
+
+  if (oxygen > 100) oxygen = 100;
+  if (oxygen < 0) oxygen = 0;
+
+  return oxygen;
+}
+
+void displayData(long irValue) {
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("TriVital Smart Watch");
+
+  display.setCursor(0, 16);
+
+  if (irValue < 50000) {
+    display.println("Place finger...");
+    display.setCursor(0, 32);
+    display.println("HR: -- BPM");
+    display.setCursor(0, 44);
+    display.println("SpO2: -- %");
+  } else {
+    display.print("HR: ");
+    display.print(beatAvg);
+    display.println(" BPM");
+
+    display.setCursor(0, 32);
+    display.print("SpO2: ");
+    display.print(spo2);
+    display.println(" %");
+  }
+
+  display.setCursor(0, 48);
+  display.print("Temp: ");
+  display.print(temperatureC);
+  display.println(" C");
+
+  if (spo2 > 0 && spo2 < 90) {
+    display.setCursor(80, 32);
+    display.println("LOW!");
+  }
+
+  if (temperatureC > 38) {
+    display.setCursor(80, 48);
+    display.println("FEVER");
+  }
+
+  display.display();
+}
+
+void sendBluetoothData() {
+  SerialBT.print("Heart Rate: ");
+  SerialBT.print(beatAvg);
+  SerialBT.print(" BPM, ");
+
+  SerialBT.print("SpO2: ");
+  SerialBT.print(spo2);
+  SerialBT.print(" %, ");
+
+  SerialBT.print("Temperature: ");
+  SerialBT.print(temperatureC);
+  SerialBT.println(" C");
+}
